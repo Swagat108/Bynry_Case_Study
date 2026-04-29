@@ -1,16 +1,23 @@
 import { Router } from 'express';
-import { Product, Inventory, sequelize } from '../models/index.js';
+import mongoose from 'mongoose';
+import Product from '../models/Product.model.js';
+import Inventory from '../models/Inventory.model.js';
 import { authenticateJWT } from '../middleware/auth.js';
 
 const router = Router();
 
 router.post('/api/products', authenticateJWT, async (req, res) => {
-    const { name, sku, price, warehouse_id, initial_quantity } = req.body;
+    const { name, sku, price, warehouse_id, company_id, initial_quantity } =
+        req.body;
 
     // Input validation
-    const missingFields = ['name', 'sku', 'price', 'warehouse_id'].filter(
-        (field) => !req.body[field]
-    );
+    const missingFields = [
+        'name',
+        'sku',
+        'price',
+        'warehouse_id',
+        'company_id',
+    ].filter((field) => !req.body[field]);
 
     if (missingFields.length > 0) {
         return res.status(400).json({
@@ -27,44 +34,54 @@ router.post('/api/products', authenticateJWT, async (req, res) => {
     }
 
     // SKU uniqueness check
-    const existingProduct = await Product.findOne({ where: { sku } });
+    const existingProduct = await Product.findOne({ sku: sku.toUpperCase() });
     if (existingProduct) {
         return res.status(409).json({
             error: 'SKU already exists across the platform.',
         });
     }
 
-    // Atomic transaction
-    const transaction = await sequelize.transaction();
+    // Atomic transaction using MongoDB session
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
     try {
+        // Create product
         const product = await Product.create(
-            {
-                name,
-                sku,
-                price: parsedPrice,
-                warehouse_id,
-            },
-            { transaction }
+            [
+                {
+                    name,
+                    sku,
+                    price: parsedPrice,
+                    company_id,
+                    warehouse_id,
+                },
+            ],
+            { session }
         );
 
+        // Create inventory entry
         await Inventory.create(
-            {
-                product_id: product.id,
-                warehouse_id,
-                quantity: initial_quantity ?? 0,
-            },
-            { transaction }
+            [
+                {
+                    product_id: product[0]._id,
+                    warehouse_id,
+                    quantity: initial_quantity ?? 0,
+                },
+            ],
+            { session }
         );
 
-        await transaction.commit();
+        await session.commitTransaction();
+        session.endSession();
 
         return res.status(201).json({
             message: 'Product created successfully',
-            product_id: product.id,
+            product_id: product[0]._id,
         });
     } catch (error) {
-        await transaction.rollback();
+        await session.abortTransaction();
+        session.endSession();
         console.error('Error creating product:', error.message);
         return res.status(500).json({ error: 'Internal server error' });
     }
